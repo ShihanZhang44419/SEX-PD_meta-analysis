@@ -1,3 +1,8 @@
+Load data
+```{r}
+#
+shihan_efit_list <- readRDS('/Users/senmnes/Downloads/shihan_efit_list.rds')
+```
 
 Helper function
 ```{r}
@@ -214,5 +219,5 @@ MA.stats.table <- function(input_list, aim, range, sig_filter, z_score){
 
 ```{r}
 # Run the function
-res <- MA.stats.table(list_toWV,'aim3',c(1:5),F,F)
+res <- MA.stats.table(shihan_efit_list,'aim3',c(1:5),F,F)
 ```
