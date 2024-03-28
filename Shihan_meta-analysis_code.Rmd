@@ -1,0 +1,218 @@
+
+Helper function
+```{r}
+# Function to calculate the effect size & standard error for each gene from each study
+meta_tbl <- function(aim, GEO_CODE) {
+  # Extract effect size, standard error, and e_fit for the specified aim and GEO code
+  coef <- meta_analysis_input[[aim]][[GEO_CODE]][['es']]
+  SE.coef <- meta_analysis_input[[aim]][[GEO_CODE]][['se']]
+  e_fit <- meta_analysis_input[[aim]][[GEO_CODE]][['efit']]
+  
+  # Create a matrix with coefficients and standard errors
+  mat_tbl <- cbind(coef, SE.coef)
+  colnames(mat_tbl) <- c("coef", "se.coef")
+  
+  # Use limma's topTable to extract genes with corresponding statistics
+  toptbl <- limma::topTable(e_fit, coef = 'sexMale', number = Inf, p.value = 1, 
+                            adjust = "fdr", sort.by = 'logFC', confint = TRUE)
+  
+  # Calculate the standard error using the confidence interval range divided by 3.92
+  toptbl$SE <- (toptbl$CI.R - toptbl$CI.L) / 3.92
+  
+  # Identify genes present in both toptbl and mat_tbl
+  int_tbl <- intersect(rownames(toptbl), rownames(mat_tbl))
+  
+  # Combine the two tables based on the intersection of gene names
+  res_tbl <- cbind(toptbl[rownames(toptbl) %in% int_tbl, ], 
+                   mat_tbl[rownames(mat_tbl) %in% int_tbl, ])
+  
+  return(res_tbl)
+}
+```
+
+Main function
+```{r}
+#
+MA.stats.table <- function(input_list, aim, range, sig_filter, z_score){
+  # Container list
+  meta_linear_sets <- list()
+  # Generate input result for all studies for aim
+  print(paste('Generate input result for all studies for',aim))
+  for(study in names(input_list[[aim]][range])){
+    meta_linear_sets[[study]] <- meta_tbl(aim, study)
+  }
+  
+  # Search a list of unique id genes for all studies
+  genes <- NULL
+  for (study in meta_linear_sets){
+    genes <- c(genes, rownames(study))
+  }
+  
+  # Filter the genes
+  print('Filtering the genes')
+  genes <- unique(genes) # Remove duplication
+  genes <- genes[!grepl("[0-9]+-[A-Z][a-z]{2}",genes)] # Remove gene symbol with special character
+  genes <- base::sort(genes) # Sort with alphabetic order
+  
+  # Generating matrix with all Log fold change for all studies
+  print('Generating matrix for LogFC and SE')
+  mat.logFC <- matrix(NA, nrow = length(genes), ncol = length(meta_linear_sets))
+  # Assign row and column names
+  rownames (mat.logFC) <- genes
+  colnames (mat.logFC) <- names(meta_linear_sets)
+  # Generating matrix with all SE for all studies  
+  mat.SE <- matrix (NA, nrow = length (genes), ncol = length(meta_linear_sets))
+  rownames (mat.SE) <- genes
+  colnames (mat.SE) <- names(meta_linear_sets)
+  
+  # Initialize a message to indicate the process start
+  print("Appending the values into the matrix")
+
+  # Iterate over each study in the meta_linear_sets list
+  for (study in seq_along(meta_linear_sets)) {
+    # Extract column names from the current study
+    col.name <- names(meta_linear_sets[study])
+    
+    # Extract the result table for the current study
+    result.table <- meta_linear_sets[[study]]
+    
+    # --- LogFC Section ---
+    # Extract LogFC values
+    logFC <- result.table$logFC
+    # Assign gene symbols as names to the LogFC vector
+    names(logFC) <- rownames(result.table)
+    # Append LogFC values to the corresponding column in the matrix
+    # Ensures only matching rownames are updated, others remain NA or previous value
+    mat.logFC[, col.name] <- logFC[match(rownames(mat.logFC), names(logFC))]
+    
+    # --- SE Section ---
+    # Extract Standard Error (SE) values
+    SE <- result.table$se.coef
+    # Assign gene symbols as names to the SE vector
+    names(SE) <- rownames(result.table)
+    # Append SE values to the corresponding column in the matrix
+    # Ensures only matching rownames are updated, others remain NA or previous value
+    mat.SE[, col.name] <- SE[match(rownames(mat.SE), names(SE))]
+  }
+
+  # Select genes included at least in 2 studies
+  print('Filter the matrix(LogFC & SE) with genes included at least in 2 studies')
+  mat.logFC.NA <- is.na(mat.logFC) # Extract NAs rows
+  sum.NA <- apply(mat.logFC.NA, 1, sum) # Count NAs for each gene
+  min.sum.NA <- sum.NA < ncol(mat.logFC) - 1 # T/F if gene appears in at least 2 studies
+  
+  # Filter by min.sum.NA
+  mat.logFC <- mat.logFC[min.sum.NA == T, ] # Only keep the gene appears in at least 2 studies
+  mat.SE <- mat.SE[min.sum.NA == T, ]
+  
+  # Z-score transformation
+  if(z_score == T){
+    mat.logFC <- scale(mat.logFC)
+    mat.SE <- scale(mat.SE)
+  }
+  
+  # Debugging point
+  m1 <<- mat.logFC
+  m2 <<- mat.SE
+  
+  # list of meta-analysis result by gene.
+  print(paste('Fitting random-effects model for each gene with config:', 'REML'))
+  n.genes <- length(rownames(mat.logFC)) # Set number of genes
+  
+  # Initialize a vector to keep track of which percentages have been printed
+  printed_percentages <- c()
+
+  # Apply function to each gene
+  mix_effect.stats <<- suppressWarnings(
+    lapply(1:n.genes, function(x) {
+      # Calculate and print progress at specific percentages
+      progress <- round(x / n.genes * 100)
+      
+      if(progress %in% c(25, 50, 75, 95) && !progress %in% printed_percentages) {
+        print(paste(progress, "% complete", sep=""))
+        # Mark this percentage as printed
+        printed_percentages <<- c(printed_percentages, progress)
+      }
+      
+      # Meta analysis function
+      rma.uni(
+        yi = mat.logFC[x, ],       # Log fold change
+        sei = mat.SE[x, ],         # Standard error
+        control = list(
+          stepadj = 0.5,           # Model step size adjustment
+          maxiter = 10000,         # Maximum number of iterations
+          method = 'REML'          # Modeling method
+        )
+      )
+    })
+  )
+  
+  # Data.frame including all detailed results:
+  print('Creating output table...')
+  # Combine results into a data frame
+  result_meta <- as.data.frame(do.call("rbind",
+    lapply(mix_effect.stats, function(x) {
+      # Extract desired statistics from each result
+      c(
+        ci.lb = x$ci.lb,   # Lower bound of the confidence interval
+        b = x$b,           # Estimate of effect size (log fold change)
+        ci.ub = x$ci.ub,   # Upper bound of the confidence interval
+        pval = x$pval,     # P-value for the test of effect
+        QE = x$QE,         # Q-statistic for heterogeneity
+        QEp = x$QEp,       # P-value for the Q-statistic
+        se = x$se,         # Standard error of the effect size estimate
+        tau2 = x$tau2,     # Estimate of between-study variance
+        I2 = x$I2,         # I^2 statistic for heterogeneity
+        H2 = x$H2          # H^2 statistic for heterogeneity
+      )
+    })
+  ))
+  
+  # Assign column names to the resulting data frame
+  colnames(result_meta) <- c(
+    "lower_bound", "logFC", "upper_bound",
+    "pvalue", "QE", "QEp", "SE", 
+    "tau2", "I2", "H2"
+  )
+  # Assgin gene symbols
+  rownames(result_meta) <- rownames(mat.logFC)
+  
+  # P value adjustment
+  print('P value adjustment...')
+  p.adjust.fdr <- stats::p.adjust(result_meta[,4], method = "fdr")
+  p.adjust.BY  <- stats::p.adjust(result_meta[,4], method = "BY")
+  # Append to table
+  result_meta <- cbind(result_meta, p.adjust.fdr, p.adjust.BY)
+  c2 <<- result_meta # Debugging point
+  print(paste('Number of rows of the result_meta ->,', nrow(result_meta)))
+  
+  # Add number of studies where the gene is evaluated
+  sum.NA_2 <- apply(is.na(mat.logFC), 1, sum) # Count NAs(missing in n.studies) for each genes
+  n.studies <- ncol(mat.logFC) - sum.NA_2 # Count n.studies
+  n.studies <- n.studies[rownames(mat.logFC)] # Filter/Matching genes
+  print(paste('Length of the n.studies ->', length(n.studies)))
+  n2 <<- n.studies # Debugging point
+  
+  # Filter out the empty names
+  print('Insert number of studies')
+  result_meta[, "n.studies"] <- n.studies
+  
+  # significant genes
+  print('Filter the table by significant genes')
+  corte <- 0.05
+  if(sig_filter == T){
+    output_tbl <- result_meta[result_meta$p.adjust.fdr < corte,]
+  }else {
+    output_tbl <- result_meta
+  }
+
+  # Output
+  print(paste('MA has been completed for',aim))
+  return(output_tbl)
+}
+```
+
+```{r}
+# Run the function
+res <- MA.stats.table(list_toWV,'aim3',c(1:5),F,F)
+```
